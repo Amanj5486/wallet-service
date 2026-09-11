@@ -24,7 +24,6 @@ gradle-app.setting
 *.sublime-workspace
 
 # Build
-*.jar
 *.war
 *.ear
 *.zip

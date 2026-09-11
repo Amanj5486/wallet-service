@@ -300,6 +300,4 @@ chmod +x test-gate-*.sh
 bash -x test-gate-1-concurrent-get-or-create.sh
 ```
 
-## License
 
-MIT

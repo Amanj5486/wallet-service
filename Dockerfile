@@ -1,15 +1,22 @@
 # Multi-stage build
 FROM eclipse-temurin:21-jdk-alpine AS builder
 WORKDIR /app
-COPY gradle/ gradle/
+
+# Copy all gradle files first
 COPY gradlew .
 COPY gradlew.bat .
+COPY gradle gradle
 COPY build.gradle .
 COPY settings.gradle .
+
+# Make gradlew executable
 RUN chmod +x ./gradlew
-RUN ./gradlew build -x test --no-daemon
-COPY src ./src
-RUN ./gradlew bootJar -x test --no-daemon
+
+# Copy source
+COPY src src
+
+# Build
+RUN ./gradlew clean bootJar -x test --no-daemon
 
 # Runtime stage
 FROM eclipse-temurin:21-jre-alpine

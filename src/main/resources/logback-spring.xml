@@ -1,25 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <property name="LOG_FILE" value="${LOG_FILE:-${LOG_PATH:-${LOG_TEMP:-${java.io.tmpdir:-/tmp}}/}spring.log}"/>
-    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <property name="LOG_FILE" value="${LOG_FILE:-logs/wallet-service.log}"/>
 
     <!-- Console Appender with JSON -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder class="net.logstash.logback.encoder.LogstashEncoder">
             <includeContext>true</includeContext>
             <customFields>{"service":"wallet-service","environment":"${ENVIRONMENT:-local}"}</customFields>
-            <fieldNames>
-                <timestamp>timestamp</timestamp>
-                <version>@version</version>
-                <message>message</message>
-                <logger>logger_name</logger>
-                <thread>thread_name</thread>
-                <level>level</level>
-                <levelValue>level_value</levelValue>
-                <mdc>mdc</mdc>
-                <caller>caller</caller>
-                <stackTrace>stack_trace</stackTrace>
-            </fieldNames>
         </encoder>
     </appender>
 
@@ -37,9 +24,6 @@
             <totalSizeCap>100MB</totalSizeCap>
         </rollingPolicy>
     </appender>
-
-    <!-- Spring Boot Default Configuration -->
-    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
 
     <!-- Root Logger -->
     <root level="INFO">

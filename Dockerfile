@@ -2,18 +2,11 @@
 FROM eclipse-temurin:21-jdk-alpine AS builder
 WORKDIR /app
 
-# Copy all gradle files first
-COPY gradlew .
-COPY gradlew.bat .
-COPY gradle gradle
-COPY build.gradle .
-COPY settings.gradle .
+# Copy everything from project root
+COPY . .
 
 # Make gradlew executable
 RUN chmod +x ./gradlew
-
-# Copy source
-COPY src src
 
 # Build
 RUN ./gradlew clean bootJar -x test --no-daemon

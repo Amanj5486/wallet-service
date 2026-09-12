@@ -137,14 +137,28 @@ public class TransferService {
         return TransferResponse.from(transfer);
     }
 
+    // Creates a FAILED transfer record in a NEW transaction for audit.
+    // The original transaction was rolled back (deadlock), so no record exists.
+    // This inserts a fresh record with status=FAILED using ON CONFLICT DO NOTHING
+    // so it's safe if the idempotency key was somehow committed by another thread.
     @Transactional
-    public void markTransferFailed(UUID idempotencyKey, String reason) {
-        transferRepository.findByIdempotencyKey(idempotencyKey).ifPresent(transfer -> {
+    public void markTransferFailed(TransferRequest request, String reason) {
+        UUID transferId = UUID.randomUUID();
+        transferRepository.insertOrIgnore(
+            transferId,
+            request.getIdempotencyKey(),
+            request.getFrom(),
+            request.getTo(),
+            request.getAmountPaise()
+        );
+
+        transferRepository.findByIdempotencyKey(request.getIdempotencyKey()).ifPresent(transfer -> {
             if ("PENDING".equals(transfer.getStatus())) {
                 transfer.setStatus("FAILED");
                 transfer.setReason(reason);
                 transferRepository.save(transfer);
-                log.info("Transfer marked as FAILED: transfer_id={}, reason={}", transfer.getId(), reason);
+                log.info("Transfer audit: transfer_id={}, status=FAILED, reason={}, from_wallet_id={}, to_wallet_id={}, amount_paise={}",
+                    transfer.getId(), reason, request.getFrom(), request.getTo(), request.getAmountPaise());
             }
         });
     }

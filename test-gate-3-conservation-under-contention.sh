@@ -99,16 +99,27 @@ done
 
 wait
 
-echo "All transfers completed. Waiting 2 seconds for DB consistency..."
-sleep 2
+echo "All transfers completed. Waiting 30 seconds for DB consistency..."
+sleep 30
 
-# Get final balances
-BALANCE_1_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
-  -H "Authorization: Bearer $USER_1" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
-BALANCE_2_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" \
-  -H "Authorization: Bearer $USER_2" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
-BALANCE_3_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_3" \
-  -H "Authorization: Bearer $USER_3" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+# Get final balances (with debug output)
+RESPONSE_1=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" -H "Authorization: Bearer $USER_1")
+RESPONSE_2=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" -H "Authorization: Bearer $USER_2")
+RESPONSE_3=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_3" -H "Authorization: Bearer $USER_3")
+
+echo "Raw responses:"
+echo "  Wallet 1: $RESPONSE_1"
+echo "  Wallet 2: $RESPONSE_2"
+echo "  Wallet 3: $RESPONSE_3"
+
+BALANCE_1_AFTER=$(echo "$RESPONSE_1" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+BALANCE_2_AFTER=$(echo "$RESPONSE_2" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+BALANCE_3_AFTER=$(echo "$RESPONSE_3" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+
+# Default to -1 if balance couldn't be parsed (to detect failures)
+BALANCE_1_AFTER=${BALANCE_1_AFTER:--1}
+BALANCE_2_AFTER=${BALANCE_2_AFTER:--1}
+BALANCE_3_AFTER=${BALANCE_3_AFTER:--1}
 
 TOTAL_AFTER=$((BALANCE_1_AFTER + BALANCE_2_AFTER + BALANCE_3_AFTER))
 

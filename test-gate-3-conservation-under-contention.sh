@@ -9,15 +9,18 @@ set -e
 
 BASE_URL="${1:-http://localhost:8080}"
 USER_ID="test-user-$(date +%s%N)"
-INITIAL_BALANCE=10000  # 100 rupees in paise
+TRANSFER_AMOUNT=100
+NUM_ROUNDS=50
 
 echo "Testing Gate 3: Conservation Under Contention"
 echo "BASE_URL: $BASE_URL"
 echo "USER_ID: $USER_ID"
+echo "Transfer amount per request: $TRANSFER_AMOUNT paise"
+echo "Number of concurrent rounds: $NUM_ROUNDS"
 echo ""
 
 # Create 3 wallets
-echo "Creating 3 wallets with initial balance $INITIAL_BALANCE paise..."
+echo "Creating 3 wallets..."
 WALLET_1=$(curl -s -X POST "$BASE_URL/wallets" \
   -H "Authorization: Bearer $USER_ID" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -32,6 +35,16 @@ WALLET_3=$(curl -s -X POST "$BASE_URL/wallets" \
   -H "Authorization: Bearer $USER_ID" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "Wallet 3: $WALLET_3"
+echo ""
+
+# Fund wallets 1 and 2 with enough balance for transfers
+INITIAL_FUND=50000
+echo "Funding wallets 1 and 2 with $INITIAL_FUND paise each..."
+curl -s -X POST "$BASE_URL/wallets/$WALLET_1/fund?amountPaise=$INITIAL_FUND" \
+  -H "Authorization: Bearer $USER_ID" > /dev/null
+curl -s -X POST "$BASE_URL/wallets/$WALLET_2/fund?amountPaise=$INITIAL_FUND" \
+  -H "Authorization: Bearer $USER_ID" > /dev/null
+echo ""
 
 # Get initial balances
 BALANCE_1_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
@@ -43,7 +56,6 @@ BALANCE_3_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_3" \
 
 TOTAL_BEFORE=$((BALANCE_1_BEFORE + BALANCE_2_BEFORE + BALANCE_3_BEFORE))
 
-echo ""
 echo "Initial balances:"
 echo "  Wallet 1: $BALANCE_1_BEFORE paise"
 echo "  Wallet 2: $BALANCE_2_BEFORE paise"
@@ -51,8 +63,7 @@ echo "  Wallet 3: $BALANCE_3_BEFORE paise"
 echo "  TOTAL: $TOTAL_BEFORE paise"
 echo ""
 
-echo "Firing 50 concurrent transfer pairs (A→B and B→A simultaneously)..."
-echo "Each transfer: 100 paise"
+echo "Firing $NUM_ROUNDS concurrent transfer pairs (A→B and B→A simultaneously)..."
 echo ""
 
 # Fire concurrent transfers
@@ -65,8 +76,8 @@ for i in {1..50}; do
       -d "{
         \"from\": \"$WALLET_1\",
         \"to\": \"$WALLET_2\",
-        \"amountPaise\": 100,
-        \"idempotencyKey\": \"a2b-$(uuidgen)\"
+        \"amountPaise\": $TRANSFER_AMOUNT,
+        \"idempotencyKey\": \"a2b-$i-$(uuidgen)\"
       }" > /dev/null 2>&1 &
     
     # B→A (reverse direction)
@@ -76,8 +87,8 @@ for i in {1..50}; do
       -d "{
         \"from\": \"$WALLET_2\",
         \"to\": \"$WALLET_1\",
-        \"amountPaise\": 100,
-        \"idempotencyKey\": \"b2a-$(uuidgen)\"
+        \"amountPaise\": $TRANSFER_AMOUNT,
+        \"idempotencyKey\": \"b2a-$i-$(uuidgen)\"
       }" > /dev/null 2>&1 &
   ) &
 done
@@ -109,12 +120,14 @@ echo ""
 echo "Results:"
 echo "--------"
 
+PASS=true
+
 # Check conservation
 if [ "$TOTAL_BEFORE" -eq "$TOTAL_AFTER" ]; then
   echo "✅ PASS: Total balance conserved ($TOTAL_BEFORE = $TOTAL_AFTER paise)"
 else
   echo "❌ FAIL: Total balance NOT conserved (before: $TOTAL_BEFORE, after: $TOTAL_AFTER)"
-  exit 1
+  PASS=false
 fi
 
 # Check no negative balances
@@ -125,9 +138,23 @@ else
   echo "  Wallet 1: $BALANCE_1_AFTER"
   echo "  Wallet 2: $BALANCE_2_AFTER"
   echo "  Wallet 3: $BALANCE_3_AFTER"
-  exit 1
+  PASS=false
+fi
+
+# Check Wallet 3 balance unchanged (it had no transfers)
+if [ "$BALANCE_3_BEFORE" -eq "$BALANCE_3_AFTER" ]; then
+  echo "✅ PASS: Wallet 3 balance unchanged (no transfers)"
+else
+  echo "❌ FAIL: Wallet 3 balance changed unexpectedly"
+  PASS=false
 fi
 
 echo ""
-echo "✅ Gate 3 PASSED: Conservation under contention verified"
-exit 0
+
+if [ "$PASS" = true ]; then
+  echo "✅ Gate 3 PASSED: Conservation under contention verified"
+  exit 0
+else
+  echo "❌ Gate 3 FAILED"
+  exit 1
+fi

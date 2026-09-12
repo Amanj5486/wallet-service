@@ -63,4 +63,17 @@ public class WalletService {
         Long total = walletRepository.getTotalBalance();
         return total != null ? total : 0L;
     }
+
+    @Transactional
+    public Wallet fundWallet(UUID walletId, Long amountPaise) {
+        log.info("Funding wallet: {} with {} paise", walletId, amountPaise);
+        walletRepository.credit(walletId, amountPaise);
+        Wallet wallet = walletRepository.findById(walletId)
+            .orElseThrow(() -> {
+                log.error("Wallet not found: {}", walletId);
+                return new RuntimeException("Wallet not found");
+            });
+        log.info("Wallet funded: {}, new balance: {} paise", walletId, wallet.getBalancePaise());
+        return wallet;
+    }
 }

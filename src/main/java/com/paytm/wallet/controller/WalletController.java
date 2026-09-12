@@ -41,4 +41,16 @@ public class WalletController {
         Wallet wallet = walletService.getWallet(id);
         return ResponseEntity.ok(WalletResponse.from(wallet));
     }
+
+    @PostMapping("/{id}/fund")
+    public ResponseEntity<WalletResponse> fundWallet(
+            @PathVariable UUID id,
+            @RequestParam Long amountPaise,
+            HttpServletRequest request) {
+        String userId = (String) request.getAttribute("userId");
+        log.info("Funding wallet: {} with {} paise for user: {}", id, amountPaise, userId);
+
+        Wallet wallet = walletService.fundWallet(id, amountPaise);
+        return ResponseEntity.ok(WalletResponse.from(wallet));
+    }
 }

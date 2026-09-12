@@ -2,44 +2,60 @@
 
 # Gate 2: Idempotent Retry Storm
 # Fire the same transfer (same key) 30 times concurrently
-# Expect exactly one debit/credit and identical responses
+# Verify: exactly one transfer created, one debit/credit, identical responses
 
 set -e
 
 BASE_URL="${1:-http://localhost:8080}"
 USER_ID="test-user-$(date +%s%N)"
 IDEMPOTENCY_KEY=$(uuidgen)
+TRANSFER_AMOUNT=1000
 
 echo "Testing Gate 2: Idempotent Retry Storm"
 echo "BASE_URL: $BASE_URL"
 echo "USER_ID: $USER_ID"
 echo "IDEMPOTENCY_KEY: $IDEMPOTENCY_KEY"
+echo ""
 
 # Create two wallets
-echo ""
-echo "Creating source wallet..."
+echo "Creating wallets..."
 WALLET_1=$(curl -s -X POST "$BASE_URL/wallets" \
   -H "Authorization: Bearer $USER_ID" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-echo "Wallet 1: $WALLET_1"
+echo "Wallet 1 (source): $WALLET_1"
 
-echo "Creating destination wallet..."
 WALLET_2=$(curl -s -X POST "$BASE_URL/wallets" \
   -H "Authorization: Bearer $USER_ID" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-echo "Wallet 2: $WALLET_2"
-
-# Fund wallet 1
+echo "Wallet 2 (destination): $WALLET_2"
 echo ""
-echo "Funding wallet 1 with 100000 paise..."
-# This would require a separate endpoint or direct DB access
-# For now, we'll just proceed with the test
 
-echo "Firing 30 concurrent transfers with same idempotency key..."
-TRANSFER_IDS=()
-RESPONSES=()
+# Fund wallet 1 with enough balance for transfers
+INITIAL_FUND=100000
+echo "Funding wallet 1 with $INITIAL_FUND paise..."
+curl -s -X POST "$BASE_URL/wallets/$WALLET_1/fund?amountPaise=$INITIAL_FUND" \
+  -H "Authorization: Bearer $USER_ID" > /dev/null
+echo ""
 
-# Fire 30 concurrent requests
+# Get initial balances
+BALANCE_1_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
+  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+BALANCE_2_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" \
+  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+
+echo "Initial balances:"
+echo "  Wallet 1: $BALANCE_1_BEFORE paise"
+echo "  Wallet 2: $BALANCE_2_BEFORE paise"
+echo ""
+
+# Fire 30 concurrent requests with SAME idempotency key
+echo "Firing 30 concurrent transfers with SAME idempotency key..."
+echo "Transfer amount: $TRANSFER_AMOUNT paise"
+echo ""
+
+RESPONSES_FILE="/tmp/gate2_responses_$$.txt"
+> "$RESPONSES_FILE"
+
 for i in {1..30}; do
   (
     RESPONSE=$(curl -s -X POST "$BASE_URL/transfers" \
@@ -48,46 +64,93 @@ for i in {1..30}; do
       -d "{
         \"from\": \"$WALLET_1\",
         \"to\": \"$WALLET_2\",
-        \"amountPaise\": 1000,
+        \"amountPaise\": $TRANSFER_AMOUNT,
         \"idempotencyKey\": \"$IDEMPOTENCY_KEY\"
       }")
     
-    echo "$RESPONSE"
+    echo "$RESPONSE" >> "$RESPONSES_FILE"
   ) &
 done
 
-# Wait for all requests to complete
 wait
 
+echo "All 30 requests completed."
 echo ""
-echo "Collecting transfer IDs from responses..."
-TRANSFER_IDS=($(for i in {1..30}; do
-  RESPONSE=$(curl -s -X POST "$BASE_URL/transfers" \
-    -H "Authorization: Bearer $USER_ID" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"from\": \"$WALLET_1\",
-      \"to\": \"$WALLET_2\",
-      \"amountPaise\": 1000,
-      \"idempotencyKey\": \"$IDEMPOTENCY_KEY\"
-    }")
-  echo "$RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
-done))
 
-# Count unique transfer IDs
-UNIQUE_TRANSFERS=$(printf '%s\n' "${TRANSFER_IDS[@]}" | sort -u | wc -l)
+# Extract unique transfer IDs
+echo "Analyzing responses..."
+TRANSFER_ID=$(grep -o '"id":"[^"]*"' "$RESPONSES_FILE" | head -1 | cut -d'"' -f4)
+UNIQUE_TRANSFERS=$(grep -o '"id":"[^"]*"' "$RESPONSES_FILE" | sort -u | wc -l)
+UNIQUE_STATUSES=$(grep -o '"status":"[^"]*"' "$RESPONSES_FILE" | sort -u | wc -l)
 
+echo "Transfer ID: $TRANSFER_ID"
+echo "Unique transfer IDs: $UNIQUE_TRANSFERS"
+echo "Unique statuses: $UNIQUE_STATUSES"
 echo ""
+
+# Wait for DB consistency
+sleep 2
+
+# Get final balances
+BALANCE_1_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
+  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+BALANCE_2_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" \
+  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+
+BALANCE_1_CHANGE=$((BALANCE_1_BEFORE - BALANCE_1_AFTER))
+BALANCE_2_CHANGE=$((BALANCE_2_AFTER - BALANCE_2_BEFORE))
+
+echo "Final balances:"
+echo "  Wallet 1: $BALANCE_1_AFTER paise (change: -$BALANCE_1_CHANGE)"
+echo "  Wallet 2: $BALANCE_2_AFTER paise (change: +$BALANCE_2_CHANGE)"
+echo ""
+
+# Validation
 echo "Results:"
 echo "--------"
-echo "Total requests: 30"
-echo "Unique transfers created: $UNIQUE_TRANSFERS"
-echo ""
 
+PASS=true
+
+# Check exactly one transfer created
 if [ "$UNIQUE_TRANSFERS" -eq 1 ]; then
   echo "✅ PASS: Exactly one transfer created (idempotency working)"
-  exit 0
 else
   echo "❌ FAIL: Expected 1 transfer, got $UNIQUE_TRANSFERS"
+  PASS=false
+fi
+
+# Check exactly one debit
+if [ "$BALANCE_1_CHANGE" -eq "$TRANSFER_AMOUNT" ]; then
+  echo "✅ PASS: Exactly one debit of $TRANSFER_AMOUNT paise"
+else
+  echo "❌ FAIL: Expected debit of $TRANSFER_AMOUNT, got $BALANCE_1_CHANGE"
+  PASS=false
+fi
+
+# Check exactly one credit
+if [ "$BALANCE_2_CHANGE" -eq "$TRANSFER_AMOUNT" ]; then
+  echo "✅ PASS: Exactly one credit of $TRANSFER_AMOUNT paise"
+else
+  echo "❌ FAIL: Expected credit of $TRANSFER_AMOUNT, got $BALANCE_2_CHANGE"
+  PASS=false
+fi
+
+# Check all responses are identical
+if [ "$UNIQUE_STATUSES" -eq 1 ]; then
+  echo "✅ PASS: All 30 responses have identical status"
+else
+  echo "❌ FAIL: Responses have different statuses"
+  PASS=false
+fi
+
+echo ""
+
+rm -f "$RESPONSES_FILE"
+
+if [ "$PASS" = true ]; then
+  echo "✅ Gate 2 PASSED: Idempotent retry storm verified"
+  exit 0
+else
+  echo "❌ Gate 2 FAILED"
   exit 1
 fi

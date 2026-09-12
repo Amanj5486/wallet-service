@@ -36,11 +36,8 @@ public class TransferService {
     @Transactional
     public TransferResponse transfer(TransferRequest request) {
         long startTime = System.currentTimeMillis();
-        log.info("Transfer initiated",
-            "from_wallet_id", request.getFrom(),
-            "to_wallet_id", request.getTo(),
-            "amount_paise", request.getAmountPaise(),
-            "idempotency_key", request.getIdempotencyKey());
+        log.info("Transfer initiated: from_wallet_id={}, to_wallet_id={}, amount_paise={}, idempotency_key={}",
+            request.getFrom(), request.getTo(), request.getAmountPaise(), request.getIdempotencyKey());
 
         // Try to insert with ON CONFLICT DO NOTHING
         // This is atomic and race-free at the database level
@@ -64,27 +61,22 @@ public class TransferService {
         if (!transfer.getFromWalletId().equals(request.getFrom()) ||
             !transfer.getToWalletId().equals(request.getTo()) ||
             !transfer.getAmountPaise().equals(request.getAmountPaise())) {
-            log.warn("Idempotency key conflict: same key, different body",
-                "idempotency_key", request.getIdempotencyKey());
+            log.warn("Idempotency key conflict: same key, different body, idempotency_key={}", request.getIdempotencyKey());
             throw new IdempotencyConflictException("Same idempotency key with different request body");
         }
 
         // Check if we created it or it already existed
         if (transfer.getId().equals(transferId)) {
-            log.info("Transfer created",
-                "transfer_id", transfer.getId(),
-                "from_wallet_id", request.getFrom(),
-                "to_wallet_id", request.getTo(),
-                "amount_paise", request.getAmountPaise());
+            log.info("Transfer created: transfer_id={}, from_wallet_id={}, to_wallet_id={}, amount_paise={}",
+                transfer.getId(), request.getFrom(), request.getTo(), request.getAmountPaise());
             metrics.recordTransferCreated();
 
             // New transfer, proceed with debit/credit
             return executeTransfer(transfer, request, startTime);
         } else {
             // Idempotent replay
-            log.info("Transfer idempotent replay",
-                "transfer_id", transfer.getId(),
-                "idempotency_key", request.getIdempotencyKey());
+            log.info("Transfer idempotent replay: transfer_id={}, idempotency_key={}",
+                transfer.getId(), request.getIdempotencyKey());
             metrics.recordIdempotentReplay();
             long duration = System.currentTimeMillis() - startTime;
             metrics.recordTransferLatency(duration);
@@ -101,11 +93,8 @@ public class TransferService {
             transfer.setStatus("DECLINED");
             transfer.setReason("INSUFFICIENT_FUNDS");
             transferRepository.save(transfer);
-            log.info("Transfer declined",
-                "transfer_id", transfer.getId(),
-                "reason", "INSUFFICIENT_FUNDS",
-                "from_wallet_id", request.getFrom(),
-                "amount_paise", request.getAmountPaise());
+            log.info("Transfer declined: transfer_id={}, reason={}, from_wallet_id={}, amount_paise={}",
+                transfer.getId(), "INSUFFICIENT_FUNDS", request.getFrom(), request.getAmountPaise());
             metrics.recordTransferDeclined();
             long duration = System.currentTimeMillis() - startTime;
             metrics.recordTransferLatency(duration);
@@ -114,10 +103,8 @@ public class TransferService {
 
         // Debit succeeded, credit destination
         walletRepository.credit(request.getTo(), request.getAmountPaise());
-        log.info("Transfer debited",
-            "transfer_id", transfer.getId(),
-            "from_wallet_id", request.getFrom(),
-            "amount_paise", request.getAmountPaise());
+        log.info("Transfer debited: transfer_id={}, from_wallet_id={}, amount_paise={}",
+            transfer.getId(), request.getFrom(), request.getAmountPaise());
 
         // Create ledger entries (immutable audit trail)
         LedgerEntry debitEntry = new LedgerEntry();
@@ -136,20 +123,15 @@ public class TransferService {
         creditEntry.setEntryType("CREDIT");
         ledgerRepository.save(creditEntry);
 
-        log.info("Transfer credited",
-            "transfer_id", transfer.getId(),
-            "to_wallet_id", request.getTo(),
-            "amount_paise", request.getAmountPaise());
+        log.info("Transfer credited: transfer_id={}, to_wallet_id={}, amount_paise={}",
+            transfer.getId(), request.getTo(), request.getAmountPaise());
 
         // Mark transfer as completed
         transfer.setStatus("COMPLETED");
         transferRepository.save(transfer);
 
-        log.info("Transfer completed",
-            "transfer_id", transfer.getId(),
-            "from_wallet_id", request.getFrom(),
-            "to_wallet_id", request.getTo(),
-            "amount_paise", request.getAmountPaise());
+        log.info("Transfer completed: transfer_id={}, from_wallet_id={}, to_wallet_id={}, amount_paise={}",
+            transfer.getId(), request.getFrom(), request.getTo(), request.getAmountPaise());
 
         long duration = System.currentTimeMillis() - startTime;
         metrics.recordTransferLatency(duration);

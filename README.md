@@ -222,36 +222,44 @@ CREATE TABLE ledger_entries (
 
 ## Design Decisions
 
-### Money Movement: Conditional UPDATE
-We use atomic conditional UPDATE to prevent overdrafts and deadlocks:
+### Race-Free Get-or-Create
+`INSERT ... ON CONFLICT (user_id) DO NOTHING` followed by `SELECT`. Atomic at DB level — 50 concurrent creates yield exactly one wallet.
+
+**Rejected:** check-then-insert (race condition without unique constraint).
+
+### Money Movement: Conditional UPDATE + Deadlock Retry
+We use atomic conditional UPDATE to prevent overdrafts:
 ```sql
 UPDATE wallets 
-SET balance = balance - amount 
-WHERE id = wallet_id AND balance >= amount
+SET balance_paise = balance_paise - amount 
+WHERE id = wallet_id AND balance_paise >= amount
 ```
+- `rows affected = 0` → insufficient funds → transfer DECLINED
+- `rows affected = 1` → debit succeeded, proceed to credit
 
-**Why:**
-- Simplest correct mechanism
-- No deadlock risk (single row lock)
-- Atomic check + update prevents race conditions
-- Proven at Paytm's scale
+**Deadlock handling:** When A→B and B→A fire simultaneously, PostgreSQL's implicit row locks can deadlock (Thread 1 holds A, wants B; Thread 2 holds B, wants A). PostgreSQL detects this instantly and kills one transaction. The controller retries with exponential backoff (50ms, 100ms, 200ms). Failed transfers after all retries are audited in the DB with status=FAILED.
 
-### Idempotency: Unique Constraint + Same Transaction
-Idempotency key uniqueness is enforced by a DB constraint and committed in the same transaction as the ledger movement.
+**Why conditional UPDATE over alternatives:**
+- **vs SELECT FOR UPDATE with sorted locking:** Eliminates deadlock but holds locks for entire transaction duration, causing connection pool exhaustion under high concurrency. Conditional UPDATE locks rows only during the UPDATE statement itself — higher throughput.
+- **vs SERIALIZABLE isolation:** Requires retry-on-serialization-failure for every transaction, not just the rare deadlock case. Higher overhead, more complex.
+- **vs read-subtract-write:** Lost updates create/destroy money. Not acceptable.
 
-**Why:**
-- Atomic at DB level
-- Prevents TOCTOU (time-of-check-time-of-use) races
-- Concurrent duplicates: one succeeds, others get exception
-- Same key + different body returns 409 Conflict
+### Idempotency: ON CONFLICT DO NOTHING in Same Transaction
+`INSERT ... ON CONFLICT (idempotency_key) DO NOTHING` committed in the **same transaction** as the debit/credit. This prevents TOCTOU races — uniqueness and ledger movement are atomic.
 
-### Consistency: Strong (CP)
-We chose strong consistency over availability.
+- Same key + same body → idempotent replay (returns existing transfer)
+- Same key + different body → 409 Conflict
+- Concurrent duplicates → one wins the insert, others read the existing record
 
-**Why:**
-- Money requires correctness
-- Stale balance reads could lead to overdrafts
-- "Best-effort" is not acceptable for financial systems
+**Rejected:** checking idempotency in a separate transaction (TOCTOU → double debit under concurrency). App-memory-only checks (breaks across instances).
+
+### Consistency vs Availability
+We chose **strong consistency (CP)** over availability.
+
+- Money requires correctness — a stale balance read could allow overdraft
+- Transfers block under contention rather than returning stale data
+- "Best-effort" or "eventual consistency" is not acceptable for financial ledgers
+- Trade-off: lower throughput under extreme contention on the same wallets
 
 ## Deployment
 

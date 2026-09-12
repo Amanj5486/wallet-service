@@ -17,15 +17,18 @@ echo "USER_ID: $USER_ID"
 echo "IDEMPOTENCY_KEY: $IDEMPOTENCY_KEY"
 echo ""
 
-# Create two wallets
+# Create two wallets (different users to get different wallets)
 echo "Creating wallets..."
+USER_1="$USER_ID-user1"
+USER_2="$USER_ID-user2"
+
 WALLET_1=$(curl -s -X POST "$BASE_URL/wallets" \
-  -H "Authorization: Bearer $USER_ID" \
+  -H "Authorization: Bearer $USER_1" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "Wallet 1 (source): $WALLET_1"
 
 WALLET_2=$(curl -s -X POST "$BASE_URL/wallets" \
-  -H "Authorization: Bearer $USER_ID" \
+  -H "Authorization: Bearer $USER_2" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "Wallet 2 (destination): $WALLET_2"
 echo ""
@@ -39,9 +42,9 @@ echo ""
 
 # Get initial balances
 BALANCE_1_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_1" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 BALANCE_2_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_2" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 
 echo "Initial balances:"
 echo "  Wallet 1: $BALANCE_1_BEFORE paise"
@@ -59,7 +62,7 @@ RESPONSES_FILE="/tmp/gate2_responses_$$.txt"
 for i in {1..30}; do
   (
     RESPONSE=$(curl -s -X POST "$BASE_URL/transfers" \
-      -H "Authorization: Bearer $USER_ID" \
+      -H "Authorization: Bearer $USER_1" \
       -H "Content-Type: application/json" \
       -d "{
         \"from\": \"$WALLET_1\",
@@ -77,13 +80,20 @@ wait
 echo "All 30 requests completed."
 echo ""
 
+# Show first response for debugging
+echo "Sample response:"
+head -1 "$RESPONSES_FILE" | jq . 2>/dev/null || head -1 "$RESPONSES_FILE"
+echo ""
+
 # Extract unique transfer IDs
 echo "Analyzing responses..."
 TRANSFER_ID=$(grep -o '"id":"[^"]*"' "$RESPONSES_FILE" | head -1 | cut -d'"' -f4)
 UNIQUE_TRANSFERS=$(grep -o '"id":"[^"]*"' "$RESPONSES_FILE" | sort -u | wc -l)
 UNIQUE_STATUSES=$(grep -o '"status":"[^"]*"' "$RESPONSES_FILE" | sort -u | wc -l)
+TRANSFER_STATUS=$(grep -o '"status":"[^"]*"' "$RESPONSES_FILE" | head -1 | cut -d'"' -f4)
 
 echo "Transfer ID: $TRANSFER_ID"
+echo "Transfer Status: $TRANSFER_STATUS"
 echo "Unique transfer IDs: $UNIQUE_TRANSFERS"
 echo "Unique statuses: $UNIQUE_STATUSES"
 echo ""
@@ -93,9 +103,9 @@ sleep 2
 
 # Get final balances
 BALANCE_1_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_1" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 BALANCE_2_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_2" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 
 BALANCE_1_CHANGE=$((BALANCE_1_BEFORE - BALANCE_1_AFTER))
 BALANCE_2_CHANGE=$((BALANCE_2_AFTER - BALANCE_2_BEFORE))

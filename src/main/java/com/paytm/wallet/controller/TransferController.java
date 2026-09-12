@@ -29,7 +29,8 @@ public class TransferController {
             @RequestBody TransferRequest request,
             HttpServletRequest httpRequest) {
         String userId = (String) httpRequest.getAttribute("userId");
-        log.info("Creating transfer for user: {}", userId);
+        log.info("Creating transfer: from_wallet_id={}, to_wallet_id={}, amount_paise={}, idempotency_key={}, user_id={}",
+            request.getFrom(), request.getTo(), request.getAmountPaise(), request.getIdempotencyKey(), userId);
 
         try {
             TransferResponse response = transferService.transfer(request);
@@ -50,7 +51,7 @@ public class TransferController {
             @PathVariable UUID id,
             HttpServletRequest request) {
         String userId = (String) request.getAttribute("userId");
-        log.info("Getting transfer: {} for user: {}", id, userId);
+        log.info("Getting transfer: transfer_id={}, user_id={}", id, userId);
 
         TransferResponse response = transferService.getTransfer(id);
         return ResponseEntity.ok(response);

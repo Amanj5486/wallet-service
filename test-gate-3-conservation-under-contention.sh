@@ -19,20 +19,24 @@ echo "Transfer amount per request: $TRANSFER_AMOUNT paise"
 echo "Number of concurrent rounds: $NUM_ROUNDS"
 echo ""
 
-# Create 3 wallets
+# Create 3 wallets (different users to get different wallets)
 echo "Creating 3 wallets..."
+USER_1="$USER_ID-user1"
+USER_2="$USER_ID-user2"
+USER_3="$USER_ID-user3"
+
 WALLET_1=$(curl -s -X POST "$BASE_URL/wallets" \
-  -H "Authorization: Bearer $USER_ID" \
+  -H "Authorization: Bearer $USER_1" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "Wallet 1: $WALLET_1"
 
 WALLET_2=$(curl -s -X POST "$BASE_URL/wallets" \
-  -H "Authorization: Bearer $USER_ID" \
+  -H "Authorization: Bearer $USER_2" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "Wallet 2: $WALLET_2"
 
 WALLET_3=$(curl -s -X POST "$BASE_URL/wallets" \
-  -H "Authorization: Bearer $USER_ID" \
+  -H "Authorization: Bearer $USER_3" \
   -H "Content-Type: application/json" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "Wallet 3: $WALLET_3"
 echo ""
@@ -41,18 +45,18 @@ echo ""
 INITIAL_FUND=50000
 echo "Funding wallets 1 and 2 with $INITIAL_FUND paise each..."
 curl -s -X POST "$BASE_URL/wallets/$WALLET_1/fund?amountPaise=$INITIAL_FUND" \
-  -H "Authorization: Bearer $USER_ID" > /dev/null
+  -H "Authorization: Bearer $USER_1" > /dev/null
 curl -s -X POST "$BASE_URL/wallets/$WALLET_2/fund?amountPaise=$INITIAL_FUND" \
-  -H "Authorization: Bearer $USER_ID" > /dev/null
+  -H "Authorization: Bearer $USER_2" > /dev/null
 echo ""
 
 # Get initial balances
 BALANCE_1_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_1" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 BALANCE_2_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_2" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 BALANCE_3_BEFORE=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_3" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_3" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 
 TOTAL_BEFORE=$((BALANCE_1_BEFORE + BALANCE_2_BEFORE + BALANCE_3_BEFORE))
 
@@ -71,24 +75,24 @@ for i in {1..50}; do
   (
     # A→B
     curl -s -X POST "$BASE_URL/transfers" \
-      -H "Authorization: Bearer $USER_ID" \
+      -H "Authorization: Bearer $USER_1" \
       -H "Content-Type: application/json" \
       -d "{
         \"from\": \"$WALLET_1\",
         \"to\": \"$WALLET_2\",
         \"amountPaise\": $TRANSFER_AMOUNT,
-        \"idempotencyKey\": \"a2b-$i-$(uuidgen)\"
+        \"idempotencyKey\": \"$(uuidgen)\"
       }" > /dev/null 2>&1 &
     
     # B→A (reverse direction)
     curl -s -X POST "$BASE_URL/transfers" \
-      -H "Authorization: Bearer $USER_ID" \
+      -H "Authorization: Bearer $USER_2" \
       -H "Content-Type: application/json" \
       -d "{
         \"from\": \"$WALLET_2\",
         \"to\": \"$WALLET_1\",
         \"amountPaise\": $TRANSFER_AMOUNT,
-        \"idempotencyKey\": \"b2a-$i-$(uuidgen)\"
+        \"idempotencyKey\": \"$(uuidgen)\"
       }" > /dev/null 2>&1 &
   ) &
 done
@@ -100,11 +104,11 @@ sleep 2
 
 # Get final balances
 BALANCE_1_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_1" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_1" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 BALANCE_2_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_2" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_2" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 BALANCE_3_AFTER=$(curl -s -X GET "$BASE_URL/wallets/$WALLET_3" \
-  -H "Authorization: Bearer $USER_ID" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
+  -H "Authorization: Bearer $USER_3" | grep -o '"balancePaise":[0-9]*' | cut -d':' -f2)
 
 TOTAL_AFTER=$((BALANCE_1_AFTER + BALANCE_2_AFTER + BALANCE_3_AFTER))
 

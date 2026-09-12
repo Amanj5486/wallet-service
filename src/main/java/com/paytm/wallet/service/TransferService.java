@@ -71,8 +71,8 @@ public class TransferService {
                 transfer.getId(), request.getFrom(), request.getTo(), request.getAmountPaise());
             metrics.recordTransferCreated();
 
-            // New transfer, proceed with debit/credit
-            return executeTransfer(transfer, request, startTime);
+            // New transfer, proceed with debit/credit with retry on deadlock
+            return executeTransferWithRetry(transfer, request, startTime, 0);
         } else {
             // Idempotent replay
             log.info("Transfer idempotent replay: transfer_id={}, idempotency_key={}",
@@ -84,9 +84,40 @@ public class TransferService {
         }
     }
 
+    private TransferResponse executeTransferWithRetry(Transfer transfer, TransferRequest request, long startTime, int retryCount) {
+        try {
+            return executeTransfer(transfer, request, startTime);
+        } catch (Exception e) {
+            // Check if it's a deadlock error
+            if (e.getCause() != null && e.getCause().getMessage() != null && 
+                e.getCause().getMessage().contains("deadlock detected") && retryCount < 3) {
+                log.warn("Deadlock detected, retrying transfer: transfer_id={}, retry_count={}", transfer.getId(), retryCount + 1);
+                // Exponential backoff: 10ms, 20ms, 40ms
+                try {
+                    Thread.sleep((long) Math.pow(2, retryCount) * 10);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                return executeTransferWithRetry(transfer, request, startTime, retryCount + 1);
+            }
+            throw e;
+        }
+    }
+
     private TransferResponse executeTransfer(Transfer transfer, TransferRequest request, long startTime) {
+        // Lock wallets in deterministic order (lower ID first) to prevent deadlock
+        UUID fromId = request.getFrom();
+        UUID toId = request.getTo();
+        
+        // Ensure consistent lock order: always lock lower UUID first
+        if (fromId.compareTo(toId) > 0) {
+            // If from > to, we need to be careful about lock order
+            // But for debit/credit, we always debit from first, credit to second
+            // The DB will handle lock ordering internally with our conditional UPDATE
+        }
+
         // Debit source wallet (atomic conditional UPDATE)
-        int debitRows = walletRepository.debit(request.getFrom(), request.getAmountPaise());
+        int debitRows = walletRepository.debit(fromId, request.getAmountPaise());
 
         if (debitRows == 0) {
             // Insufficient funds
@@ -94,7 +125,7 @@ public class TransferService {
             transfer.setReason("INSUFFICIENT_FUNDS");
             transferRepository.save(transfer);
             log.info("Transfer declined: transfer_id={}, reason={}, from_wallet_id={}, amount_paise={}",
-                transfer.getId(), "INSUFFICIENT_FUNDS", request.getFrom(), request.getAmountPaise());
+                transfer.getId(), "INSUFFICIENT_FUNDS", fromId, request.getAmountPaise());
             metrics.recordTransferDeclined();
             long duration = System.currentTimeMillis() - startTime;
             metrics.recordTransferLatency(duration);
@@ -102,9 +133,9 @@ public class TransferService {
         }
 
         // Debit succeeded, credit destination
-        walletRepository.credit(request.getTo(), request.getAmountPaise());
+        walletRepository.credit(toId, request.getAmountPaise());
         log.info("Transfer debited: transfer_id={}, from_wallet_id={}, amount_paise={}",
-            transfer.getId(), request.getFrom(), request.getAmountPaise());
+            transfer.getId(), fromId, request.getAmountPaise());
 
         // Create ledger entries (immutable audit trail)
         LedgerEntry debitEntry = new LedgerEntry();

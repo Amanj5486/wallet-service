@@ -21,6 +21,15 @@ public class AuthFilter extends OncePerRequestFilter {
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        String path = request.getRequestURI();
+        return path.startsWith("/actuator")
+            || path.equals("/health")
+            || path.startsWith("/metrics")
+            || path.equals("/prometheus");
+    }
+
+    @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {

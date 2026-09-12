@@ -34,7 +34,7 @@ public class TransferService {
         this.metrics = metrics;
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = DataIntegrityViolationException.class)
     public TransferResponse transfer(TransferRequest request) {
         long startTime = System.currentTimeMillis();
         log.info("Transfer initiated",
@@ -53,7 +53,7 @@ public class TransferService {
             transfer.setAmountPaise(request.getAmountPaise());
             transfer.setStatus("PENDING");
 
-            transferRepository.save(transfer);
+            transferRepository.saveAndFlush(transfer);
             log.info("Transfer created",
                 "transfer_id", transfer.getId(),
                 "from_wallet_id", request.getFrom(),

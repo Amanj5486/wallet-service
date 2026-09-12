@@ -50,7 +50,7 @@ for i in {1..50}; do
       -d "{
         \"from\": \"$WALLET_1\",
         \"to\": \"$WALLET_2\",
-        \"amount_paise\": 100,
+        \"amountPaise\": 100,
         \"idempotencyKey\": \"$(uuidgen)\"
       }" > /dev/null &
     
@@ -61,7 +61,7 @@ for i in {1..50}; do
       -d "{
         \"from\": \"$WALLET_2\",
         \"to\": \"$WALLET_1\",
-        \"amount_paise\": 100,
+        \"amountPaise\": 100,
         \"idempotencyKey\": \"$(uuidgen)\"
       }" > /dev/null &
   ) &

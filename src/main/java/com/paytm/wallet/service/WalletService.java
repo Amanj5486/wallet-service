@@ -4,7 +4,6 @@ import com.paytm.wallet.entity.Wallet;
 import com.paytm.wallet.metrics.TransferMetrics;
 import com.paytm.wallet.repository.WalletRepository;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,33 +20,32 @@ public class WalletService {
         this.metrics = metrics;
     }
 
-    @Transactional(noRollbackFor = DataIntegrityViolationException.class)
+    @Transactional
     public Wallet getOrCreate(String userId) {
         log.info("Getting or creating wallet for user: {}", userId);
 
-        try {
-            // Try to insert new wallet
-            Wallet wallet = new Wallet();
-            wallet.setId(UUID.randomUUID());
-            wallet.setUserId(userId);
-            wallet.setBalancePaise(0L);
+        // Try to insert with ON CONFLICT DO NOTHING
+        // This is atomic and race-free at the database level
+        UUID walletId = UUID.randomUUID();
+        walletRepository.insertOrIgnore(walletId, userId);
 
-            Wallet created = walletRepository.saveAndFlush(wallet);
+        // Fetch the wallet (either the one we just created or the existing one)
+        Wallet wallet = walletRepository.findByUserId(userId)
+            .orElseThrow(() -> {
+                log.error("Wallet not found for user: {}", userId);
+                return new RuntimeException("Wallet not found");
+            });
+
+        // Check if we created it or it already existed
+        if (wallet.getId().equals(walletId)) {
             log.info("Wallet created for user: {}", userId);
             metrics.recordWalletCreated();
-            return created;
-
-        } catch (DataIntegrityViolationException e) {
-            // Unique constraint violated, wallet already exists
+        } else {
             log.info("Wallet already exists for user: {}", userId);
-            Wallet existing = walletRepository.findByUserId(userId)
-                .orElseThrow(() -> {
-                    log.error("Wallet not found after constraint violation for user: {}", userId);
-                    return new RuntimeException("Wallet not found");
-                });
             metrics.recordWalletGetOrCreateHit();
-            return existing;
         }
+
+        return wallet;
     }
 
     @Transactional(readOnly = true)

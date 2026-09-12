@@ -14,6 +14,14 @@ public interface WalletRepository extends JpaRepository<Wallet, UUID> {
     Optional<Wallet> findByUserId(String userId);
 
     @Modifying
+    @Query(value = """
+        INSERT INTO wallets (id, user_id, balance_paise, created_at, updated_at) 
+        VALUES (:id, :userId, 0, NOW(), NOW())
+        ON CONFLICT (user_id) DO NOTHING
+    """, nativeQuery = true)
+    void insertOrIgnore(@Param("id") UUID id, @Param("userId") String userId);
+
+    @Modifying
     @Query("""
         UPDATE Wallet w 
         SET w.balancePaise = w.balancePaise - :amount 

@@ -10,7 +10,6 @@ import com.paytm.wallet.repository.LedgerRepository;
 import com.paytm.wallet.repository.TransferRepository;
 import com.paytm.wallet.repository.WalletRepository;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,7 +33,7 @@ public class TransferService {
         this.metrics = metrics;
     }
 
-    @Transactional(noRollbackFor = DataIntegrityViolationException.class)
+    @Transactional
     public TransferResponse transfer(TransferRequest request) {
         long startTime = System.currentTimeMillis();
         log.info("Transfer initiated",
@@ -43,17 +42,35 @@ public class TransferService {
             "amount_paise", request.getAmountPaise(),
             "idempotency_key", request.getIdempotencyKey());
 
-        try {
-            // Try to insert new transfer
-            Transfer transfer = new Transfer();
-            transfer.setId(UUID.randomUUID());
-            transfer.setIdempotencyKey(request.getIdempotencyKey());
-            transfer.setFromWalletId(request.getFrom());
-            transfer.setToWalletId(request.getTo());
-            transfer.setAmountPaise(request.getAmountPaise());
-            transfer.setStatus("PENDING");
+        // Try to insert with ON CONFLICT DO NOTHING
+        // This is atomic and race-free at the database level
+        UUID transferId = UUID.randomUUID();
+        transferRepository.insertOrIgnore(
+            transferId,
+            request.getIdempotencyKey(),
+            request.getFrom(),
+            request.getTo(),
+            request.getAmountPaise()
+        );
 
-            transferRepository.saveAndFlush(transfer);
+        // Fetch the transfer (either the one we just created or the existing one)
+        Transfer transfer = transferRepository.findByIdempotencyKey(request.getIdempotencyKey())
+            .orElseThrow(() -> {
+                log.error("Transfer not found for idempotency key: {}", request.getIdempotencyKey());
+                return new RuntimeException("Transfer not found");
+            });
+
+        // Verify body matches
+        if (!transfer.getFromWalletId().equals(request.getFrom()) ||
+            !transfer.getToWalletId().equals(request.getTo()) ||
+            !transfer.getAmountPaise().equals(request.getAmountPaise())) {
+            log.warn("Idempotency key conflict: same key, different body",
+                "idempotency_key", request.getIdempotencyKey());
+            throw new IdempotencyConflictException("Same idempotency key with different request body");
+        }
+
+        // Check if we created it or it already existed
+        if (transfer.getId().equals(transferId)) {
             log.info("Transfer created",
                 "transfer_id", transfer.getId(),
                 "from_wallet_id", request.getFrom(),
@@ -63,34 +80,15 @@ public class TransferService {
 
             // New transfer, proceed with debit/credit
             return executeTransfer(transfer, request, startTime);
-
-        } catch (DataIntegrityViolationException e) {
-            // Idempotency key already exists
-            log.info("Idempotency key already exists: {}", request.getIdempotencyKey());
-            Transfer existing = transferRepository.findByIdempotencyKey(request.getIdempotencyKey())
-                .orElseThrow(() -> {
-                    log.error("Transfer not found after constraint violation for idempotency key: {}",
-                        request.getIdempotencyKey());
-                    return new RuntimeException("Transfer not found");
-                });
-
-            // Verify body matches
-            if (!existing.getFromWalletId().equals(request.getFrom()) ||
-                !existing.getToWalletId().equals(request.getTo()) ||
-                !existing.getAmountPaise().equals(request.getAmountPaise())) {
-                log.warn("Idempotency key conflict: same key, different body",
-                    "idempotency_key", request.getIdempotencyKey());
-                throw new IdempotencyConflictException("Same idempotency key with different request body");
-            }
-
-            // Same body, return existing result
+        } else {
+            // Idempotent replay
             log.info("Transfer idempotent replay",
-                "transfer_id", existing.getId(),
+                "transfer_id", transfer.getId(),
                 "idempotency_key", request.getIdempotencyKey());
             metrics.recordIdempotentReplay();
             long duration = System.currentTimeMillis() - startTime;
             metrics.recordTransferLatency(duration);
-            return TransferResponse.from(existing);
+            return TransferResponse.from(transfer);
         }
     }
 

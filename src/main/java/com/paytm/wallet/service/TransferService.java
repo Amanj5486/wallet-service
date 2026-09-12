@@ -33,7 +33,6 @@ public class TransferService {
         this.metrics = metrics;
     }
 
-    @Transactional
     public TransferResponse transfer(TransferRequest request) {
         long startTime = System.currentTimeMillis();
         log.info("Transfer initiated: from_wallet_id={}, to_wallet_id={}, amount_paise={}, idempotency_key={}",
@@ -42,13 +41,7 @@ public class TransferService {
         // Try to insert with ON CONFLICT DO NOTHING
         // This is atomic and race-free at the database level
         UUID transferId = UUID.randomUUID();
-        transferRepository.insertOrIgnore(
-            transferId,
-            request.getIdempotencyKey(),
-            request.getFrom(),
-            request.getTo(),
-            request.getAmountPaise()
-        );
+        insertTransferRecord(transferId, request);
 
         // Fetch the transfer (either the one we just created or the existing one)
         Transfer transfer = transferRepository.findByIdempotencyKey(request.getIdempotencyKey())
@@ -84,9 +77,20 @@ public class TransferService {
         }
     }
 
+    @Transactional
+    private void insertTransferRecord(UUID transferId, TransferRequest request) {
+        transferRepository.insertOrIgnore(
+            transferId,
+            request.getIdempotencyKey(),
+            request.getFrom(),
+            request.getTo(),
+            request.getAmountPaise()
+        );
+    }
+
     private TransferResponse executeTransferWithRetry(Transfer transfer, TransferRequest request, long startTime, int retryCount) {
         try {
-            return executeTransfer(transfer, request, startTime);
+            return executeTransferInTransaction(transfer, request, startTime);
         } catch (Exception e) {
             // Check if it's a deadlock error
             if (e.getCause() != null && e.getCause().getMessage() != null && 
@@ -100,8 +104,25 @@ public class TransferService {
                 }
                 return executeTransferWithRetry(transfer, request, startTime, retryCount + 1);
             }
+            
+            // Non-deadlock error: mark transfer as FAILED
+            log.error("Transfer execution failed: transfer_id={}, error={}", transfer.getId(), e.getMessage());
+            markTransferFailed(transfer, e.getMessage());
             throw e;
         }
+    }
+
+    @Transactional
+    private void markTransferFailed(Transfer transfer, String reason) {
+        transfer.setStatus("FAILED");
+        transfer.setReason(reason != null ? reason.substring(0, Math.min(reason.length(), 255)) : "UNKNOWN_ERROR");
+        transferRepository.save(transfer);
+        log.info("Transfer marked as FAILED: transfer_id={}, reason={}", transfer.getId(), transfer.getReason());
+    }
+
+    @Transactional
+    private TransferResponse executeTransferInTransaction(Transfer transfer, TransferRequest request, long startTime) {
+        return executeTransfer(transfer, request, startTime);
     }
 
     private TransferResponse executeTransfer(Transfer transfer, TransferRequest request, long startTime) {

@@ -67,7 +67,7 @@ public class TransferController {
                 if (attempt == MAX_RETRIES) {
                     break;
                 }
-                long backoffMs = 50L * (1L << attempt); // 50ms, 100ms, 200ms
+                long backoffMs = 50L * (1L << attempt) + java.util.concurrent.ThreadLocalRandom.current().nextLong(50); // 50-100ms, 100-150ms, 200-250ms
                 log.warn("Deadlock detected, retrying transfer: attempt={}, backoff_ms={}, idempotency_key={}",
                     attempt + 1, backoffMs, request.getIdempotencyKey());
                 try {

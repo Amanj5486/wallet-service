@@ -33,41 +33,56 @@ public class TransferService {
         this.metrics = metrics;
     }
 
+    @Transactional
     public TransferResponse transfer(TransferRequest request) {
         long startTime = System.currentTimeMillis();
         log.info("Transfer initiated: from_wallet_id={}, to_wallet_id={}, amount_paise={}, idempotency_key={}",
             request.getFrom(), request.getTo(), request.getAmountPaise(), request.getIdempotencyKey());
 
-        // Try to insert with ON CONFLICT DO NOTHING
-        // This is atomic and race-free at the database level
-        UUID transferId = UUID.randomUUID();
-        insertTransferRecord(transferId, request);
+        UUID fromId = request.getFrom();
+        UUID toId = request.getTo();
 
-        // Fetch the transfer (either the one we just created or the existing one)
+        // ── Step 1: Deterministic lock ordering ──
+        // Always lock the lower UUID first to prevent deadlock when
+        // A→B and B→A fire simultaneously.
+        UUID firstId = fromId.compareTo(toId) < 0 ? fromId : toId;
+        UUID secondId = fromId.compareTo(toId) < 0 ? toId : fromId;
+
+        walletRepository.findByIdForUpdate(firstId)
+            .orElseThrow(() -> new RuntimeException("Wallet not found: " + firstId));
+        walletRepository.findByIdForUpdate(secondId)
+            .orElseThrow(() -> new RuntimeException("Wallet not found: " + secondId));
+
+        // ── Step 2: Idempotency via ON CONFLICT DO NOTHING ──
+        // Insert transfer record atomically. If idempotency_key already exists,
+        // the INSERT is silently ignored. This is in the SAME transaction as
+        // the debit/credit below, so uniqueness and ledger movement are atomic.
+        UUID transferId = UUID.randomUUID();
+        transferRepository.insertOrIgnore(
+            transferId,
+            request.getIdempotencyKey(),
+            fromId,
+            toId,
+            request.getAmountPaise()
+        );
+
+        // Fetch the transfer (the one we just created, or the existing one)
         Transfer transfer = transferRepository.findByIdempotencyKey(request.getIdempotencyKey())
             .orElseThrow(() -> {
                 log.error("Transfer not found for idempotency key: {}", request.getIdempotencyKey());
                 return new RuntimeException("Transfer not found");
             });
 
-        // Verify body matches
-        if (!transfer.getFromWalletId().equals(request.getFrom()) ||
-            !transfer.getToWalletId().equals(request.getTo()) ||
+        // Same key + different body → 409
+        if (!transfer.getFromWalletId().equals(fromId) ||
+            !transfer.getToWalletId().equals(toId) ||
             !transfer.getAmountPaise().equals(request.getAmountPaise())) {
             log.warn("Idempotency key conflict: same key, different body, idempotency_key={}", request.getIdempotencyKey());
             throw new IdempotencyConflictException("Same idempotency key with different request body");
         }
 
-        // Check if we created it or it already existed
-        if (transfer.getId().equals(transferId)) {
-            log.info("Transfer created: transfer_id={}, from_wallet_id={}, to_wallet_id={}, amount_paise={}",
-                transfer.getId(), request.getFrom(), request.getTo(), request.getAmountPaise());
-            metrics.recordTransferCreated();
-
-            // New transfer, proceed with debit/credit with retry on deadlock
-            return executeTransferWithRetry(transfer, request, startTime, 0);
-        } else {
-            // Idempotent replay
+        // Idempotent replay — transfer already executed
+        if (!transfer.getId().equals(transferId)) {
             log.info("Transfer idempotent replay: transfer_id={}, idempotency_key={}",
                 transfer.getId(), request.getIdempotencyKey());
             metrics.recordIdempotentReplay();
@@ -75,94 +90,39 @@ public class TransferService {
             metrics.recordTransferLatency(duration);
             return TransferResponse.from(transfer);
         }
-    }
 
-    @Transactional
-    private void insertTransferRecord(UUID transferId, TransferRequest request) {
-        transferRepository.insertOrIgnore(
-            transferId,
-            request.getIdempotencyKey(),
-            request.getFrom(),
-            request.getTo(),
-            request.getAmountPaise()
-        );
-    }
+        // ── Step 3: New transfer — execute debit/credit ──
+        log.info("Transfer created: transfer_id={}, from_wallet_id={}, to_wallet_id={}, amount_paise={}",
+            transfer.getId(), fromId, toId, request.getAmountPaise());
+        metrics.recordTransferCreated();
 
-    private TransferResponse executeTransferWithRetry(Transfer transfer, TransferRequest request, long startTime, int retryCount) {
-        try {
-            return executeTransferInTransaction(transfer, request, startTime);
-        } catch (Exception e) {
-            // Check if it's a deadlock error
-            if (e.getCause() != null && e.getCause().getMessage() != null && 
-                e.getCause().getMessage().contains("deadlock detected") && retryCount < 3) {
-                log.warn("Deadlock detected, retrying transfer: transfer_id={}, retry_count={}", transfer.getId(), retryCount + 1);
-                // Exponential backoff: 10ms, 20ms, 40ms
-                try {
-                    Thread.sleep((long) Math.pow(2, retryCount) * 10);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-                return executeTransferWithRetry(transfer, request, startTime, retryCount + 1);
-            }
-            
-            // Non-deadlock error: mark transfer as FAILED
-            log.error("Transfer execution failed: transfer_id={}, error={}", transfer.getId(), e.getMessage());
-            markTransferFailed(transfer, e.getMessage());
-            throw e;
-        }
-    }
-
-    @Transactional
-    private void markTransferFailed(Transfer transfer, String reason) {
-        transfer.setStatus("FAILED");
-        transfer.setReason(reason != null ? reason.substring(0, Math.min(reason.length(), 255)) : "UNKNOWN_ERROR");
-        transferRepository.save(transfer);
-        log.info("Transfer marked as FAILED: transfer_id={}, reason={}", transfer.getId(), transfer.getReason());
-    }
-
-    @Transactional
-    private TransferResponse executeTransferInTransaction(Transfer transfer, TransferRequest request, long startTime) {
-        return executeTransfer(transfer, request, startTime);
-    }
-
-    private TransferResponse executeTransfer(Transfer transfer, TransferRequest request, long startTime) {
-        // Lock wallets in deterministic order (lower ID first) to prevent deadlock
-        UUID fromId = request.getFrom();
-        UUID toId = request.getTo();
-        
-        // Ensure consistent lock order: always lock lower UUID first
-        if (fromId.compareTo(toId) > 0) {
-            // If from > to, we need to be careful about lock order
-            // But for debit/credit, we always debit from first, credit to second
-            // The DB will handle lock ordering internally with our conditional UPDATE
-        }
-
-        // Debit source wallet (atomic conditional UPDATE)
+        // Conditional debit: UPDATE ... WHERE balance >= amount
+        // Returns 0 rows if insufficient funds — no overdraft possible
         int debitRows = walletRepository.debit(fromId, request.getAmountPaise());
 
         if (debitRows == 0) {
-            // Insufficient funds
             transfer.setStatus("DECLINED");
             transfer.setReason("INSUFFICIENT_FUNDS");
             transferRepository.save(transfer);
-            log.info("Transfer declined: transfer_id={}, reason={}, from_wallet_id={}, amount_paise={}",
-                transfer.getId(), "INSUFFICIENT_FUNDS", fromId, request.getAmountPaise());
+            log.info("Transfer declined: transfer_id={}, reason=INSUFFICIENT_FUNDS, from_wallet_id={}, amount_paise={}",
+                transfer.getId(), fromId, request.getAmountPaise());
             metrics.recordTransferDeclined();
             long duration = System.currentTimeMillis() - startTime;
             metrics.recordTransferLatency(duration);
             return TransferResponse.from(transfer);
         }
 
-        // Debit succeeded, credit destination
-        walletRepository.credit(toId, request.getAmountPaise());
-        log.info("Transfer debited: transfer_id={}, from_wallet_id={}, amount_paise={}",
-            transfer.getId(), fromId, request.getAmountPaise());
+        // Credit destination
+        int creditRows = walletRepository.credit(toId, request.getAmountPaise());
+        if (creditRows == 0) {
+            throw new RuntimeException("Destination wallet not found: " + toId);
+        }
 
-        // Create ledger entries (immutable audit trail)
+        // ── Step 4: Ledger entries (immutable audit trail) ──
         LedgerEntry debitEntry = new LedgerEntry();
         debitEntry.setId(UUID.randomUUID());
         debitEntry.setTransferId(transfer.getId());
-        debitEntry.setWalletId(request.getFrom());
+        debitEntry.setWalletId(fromId);
         debitEntry.setAmountPaise(request.getAmountPaise());
         debitEntry.setEntryType("DEBIT");
         ledgerRepository.save(debitEntry);
@@ -170,20 +130,17 @@ public class TransferService {
         LedgerEntry creditEntry = new LedgerEntry();
         creditEntry.setId(UUID.randomUUID());
         creditEntry.setTransferId(transfer.getId());
-        creditEntry.setWalletId(request.getTo());
+        creditEntry.setWalletId(toId);
         creditEntry.setAmountPaise(request.getAmountPaise());
         creditEntry.setEntryType("CREDIT");
         ledgerRepository.save(creditEntry);
 
-        log.info("Transfer credited: transfer_id={}, to_wallet_id={}, amount_paise={}",
-            transfer.getId(), request.getTo(), request.getAmountPaise());
-
-        // Mark transfer as completed
+        // ── Step 5: Mark completed ──
         transfer.setStatus("COMPLETED");
         transferRepository.save(transfer);
 
         log.info("Transfer completed: transfer_id={}, from_wallet_id={}, to_wallet_id={}, amount_paise={}",
-            transfer.getId(), request.getFrom(), request.getTo(), request.getAmountPaise());
+            transfer.getId(), fromId, toId, request.getAmountPaise());
 
         long duration = System.currentTimeMillis() - startTime;
         metrics.recordTransferLatency(duration);

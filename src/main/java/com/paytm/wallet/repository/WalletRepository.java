@@ -1,7 +1,9 @@
 package com.paytm.wallet.repository;
 
 import com.paytm.wallet.entity.Wallet;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -20,6 +22,12 @@ public interface WalletRepository extends JpaRepository<Wallet, UUID> {
         ON CONFLICT (user_id) DO NOTHING
     """, nativeQuery = true)
     void insertOrIgnore(@Param("id") UUID id, @Param("userId") String userId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("""
+        SELECT w FROM Wallet w WHERE w.id = :walletId
+    """)
+    Optional<Wallet> findByIdForUpdate(@Param("walletId") UUID walletId);
 
     @Modifying
     @Query("""

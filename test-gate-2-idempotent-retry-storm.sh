@@ -48,7 +48,7 @@ for i in {1..30}; do
       -d "{
         \"from\": \"$WALLET_1\",
         \"to\": \"$WALLET_2\",
-        \"amount_paise\": 1000,
+        \"amountPaise\": 1000,
         \"idempotencyKey\": \"$IDEMPOTENCY_KEY\"
       }")
     
@@ -68,7 +68,7 @@ TRANSFER_IDS=($(for i in {1..30}; do
     -d "{
       \"from\": \"$WALLET_1\",
       \"to\": \"$WALLET_2\",
-      \"amount_paise\": 1000,
+      \"amountPaise\": 1000,
       \"idempotencyKey\": \"$IDEMPOTENCY_KEY\"
     }")
   echo "$RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4

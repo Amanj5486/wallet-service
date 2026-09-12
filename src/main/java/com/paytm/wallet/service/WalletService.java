@@ -21,7 +21,7 @@ public class WalletService {
         this.metrics = metrics;
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = DataIntegrityViolationException.class)
     public Wallet getOrCreate(String userId) {
         log.info("Getting or creating wallet for user: {}", userId);
 
@@ -32,9 +32,8 @@ public class WalletService {
             wallet.setUserId(userId);
             wallet.setBalancePaise(0L);
 
-            Wallet created = walletRepository.save(wallet);
-            log.info("Wallet created for user: {}", userId,
-                "wallet_id", created.getId());
+            Wallet created = walletRepository.saveAndFlush(wallet);
+            log.info("Wallet created for user: {}", userId);
             metrics.recordWalletCreated();
             return created;
 

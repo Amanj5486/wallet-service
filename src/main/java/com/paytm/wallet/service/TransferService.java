@@ -10,6 +10,7 @@ import com.paytm.wallet.repository.LedgerRepository;
 import com.paytm.wallet.repository.TransferRepository;
 import com.paytm.wallet.repository.WalletRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,6 +19,8 @@ import java.util.UUID;
 @Service
 @Slf4j
 public class TransferService {
+    private static final int MAX_RETRIES = 3;
+
     private final TransferRepository transferRepository;
     private final WalletRepository walletRepository;
     private final LedgerRepository ledgerRepository;
@@ -33,30 +36,62 @@ public class TransferService {
         this.metrics = metrics;
     }
 
-    @Transactional
+    // No @Transactional here — retry loop lives OUTSIDE the transaction
+    // so each attempt gets a fresh transaction via executeTransfer()
     public TransferResponse transfer(TransferRequest request) {
         long startTime = System.currentTimeMillis();
         log.info("Transfer initiated: from_wallet_id={}, to_wallet_id={}, amount_paise={}, idempotency_key={}",
             request.getFrom(), request.getTo(), request.getAmountPaise(), request.getIdempotencyKey());
 
+        CannotAcquireLockException lastException = null;
+
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                return executeTransfer(request, startTime);
+            } catch (CannotAcquireLockException e) {
+                lastException = e;
+                if (attempt == MAX_RETRIES) {
+                    break;
+                }
+                long backoffMs = 50L * (1L << attempt); // 50ms, 100ms, 200ms
+                log.warn("Deadlock detected, retrying transfer: attempt={}, backoff_ms={}, idempotency_key={}",
+                    attempt + 1, backoffMs, request.getIdempotencyKey());
+                try {
+                    Thread.sleep(backoffMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Transfer interrupted", ie);
+                }
+            }
+        }
+
+        // All retries exhausted — mark transfer as FAILED in a new transaction
+        log.error("Transfer failed after {} retries due to deadlock: idempotency_key={}",
+            MAX_RETRIES, request.getIdempotencyKey());
+        markTransferFailed(request.getIdempotencyKey(), "DEADLOCK_RETRIES_EXHAUSTED");
+        throw lastException;
+    }
+
+    @Transactional
+    public void markTransferFailed(UUID idempotencyKey, String reason) {
+        transferRepository.findByIdempotencyKey(idempotencyKey).ifPresent(transfer -> {
+            if ("PENDING".equals(transfer.getStatus())) {
+                transfer.setStatus("FAILED");
+                transfer.setReason(reason);
+                transferRepository.save(transfer);
+                log.info("Transfer marked as FAILED: transfer_id={}, reason={}", transfer.getId(), reason);
+            }
+        });
+    }
+
+    @Transactional
+    public TransferResponse executeTransfer(TransferRequest request, long startTime) {
         UUID fromId = request.getFrom();
         UUID toId = request.getTo();
 
-        // ── Step 1: Deterministic lock ordering ──
-        // Always lock the lower UUID first to prevent deadlock when
-        // A→B and B→A fire simultaneously.
-        UUID firstId = fromId.compareTo(toId) < 0 ? fromId : toId;
-        UUID secondId = fromId.compareTo(toId) < 0 ? toId : fromId;
-
-        walletRepository.findByIdForUpdate(firstId)
-            .orElseThrow(() -> new RuntimeException("Wallet not found: " + firstId));
-        walletRepository.findByIdForUpdate(secondId)
-            .orElseThrow(() -> new RuntimeException("Wallet not found: " + secondId));
-
-        // ── Step 2: Idempotency via ON CONFLICT DO NOTHING ──
-        // Insert transfer record atomically. If idempotency_key already exists,
-        // the INSERT is silently ignored. This is in the SAME transaction as
-        // the debit/credit below, so uniqueness and ledger movement are atomic.
+        // ── Step 1: Idempotency via ON CONFLICT DO NOTHING ──
+        // Insert is in the SAME transaction as debit/credit,
+        // so idempotency key uniqueness and ledger movement are atomic.
         UUID transferId = UUID.randomUUID();
         transferRepository.insertOrIgnore(
             transferId,
@@ -91,13 +126,15 @@ public class TransferService {
             return TransferResponse.from(transfer);
         }
 
-        // ── Step 3: New transfer — execute debit/credit ──
+        // ── Step 2: Conditional debit ──
+        // UPDATE wallets SET balance = balance - amount WHERE id = ? AND balance >= amount
+        // Atomic at DB level: no overdraft possible, no explicit locks needed.
+        // PostgreSQL acquires implicit row-level locks during UPDATE.
+        // Rare deadlock on A→B + B→A is handled by retry loop in transfer().
         log.info("Transfer created: transfer_id={}, from_wallet_id={}, to_wallet_id={}, amount_paise={}",
             transfer.getId(), fromId, toId, request.getAmountPaise());
         metrics.recordTransferCreated();
 
-        // Conditional debit: UPDATE ... WHERE balance >= amount
-        // Returns 0 rows if insufficient funds — no overdraft possible
         int debitRows = walletRepository.debit(fromId, request.getAmountPaise());
 
         if (debitRows == 0) {
@@ -112,7 +149,7 @@ public class TransferService {
             return TransferResponse.from(transfer);
         }
 
-        // Credit destination
+        // ── Step 3: Credit destination ──
         int creditRows = walletRepository.credit(toId, request.getAmountPaise());
         if (creditRows == 0) {
             throw new RuntimeException("Destination wallet not found: " + toId);

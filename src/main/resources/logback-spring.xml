@@ -30,7 +30,7 @@
         <syslogHost>${PAPERTRAIL_HOST:-logs1.papertrail.com}</syslogHost>
         <port>${PAPERTRAIL_PORT:-12345}</port>
         <facility>USER</facility>
-        <suffixPattern>%correlationId %logger{20}: %msg</suffixPattern>
+        <suffixPattern>%logger{20}: %msg</suffixPattern>
     </appender>
 
     <!-- Root Logger -->

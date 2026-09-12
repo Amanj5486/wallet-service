@@ -46,7 +46,6 @@ public class TransferController {
         } catch (CannotAcquireLockException e) {
             log.error("Transfer FAILED after {} retries due to deadlock: from_wallet_id={}, to_wallet_id={}, amount_paise={}, idempotency_key={}",
                 MAX_RETRIES, request.getFrom(), request.getTo(), request.getAmountPaise(), request.getIdempotencyKey());
-            transferService.markTransferFailed(request, "DEADLOCK_RETRIES_EXHAUSTED");
             Map<String, String> errorResponse = new HashMap<>();
             errorResponse.put("error", "DEADLOCK_RETRIES_EXHAUSTED");
             errorResponse.put("message", "Transfer failed due to contention, please retry");
